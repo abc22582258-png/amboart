@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>專屬預約表</title>
+  
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  
+  <link href="https://fonts.googleapis.com/css2?family=Dancing+Script:wght@600;700&family=Quicksand:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div id="root"></div>
+
+  <!-- 雲端存檔套件開始 -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+    import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+    import { getFirestore, doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+    async function initFirebase() {
+        try {
+            const appId = typeof __app_id !== 'undefined' ? __app_id : 'ambo-art-calendar';
+            const configStr = typeof __firebase_config !== 'undefined' ? __firebase_config : '{}';
+            const config = JSON.parse(configStr);
+            if (Object.keys(config).length === 0) return;
+
+            const app = initializeApp(config);
+            const auth = getAuth(app);
+            const db = getFirestore(app);
+
+            const token = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+            if (token) await signInWithCustomToken(auth, token);
+            else await signInAnonymously(auth);
+
+            window.fbStore = { db, auth, appId, doc, setDoc, onSnapshot };
+            window.dispatchEvent(new Event('firebase-ready'));
+        } catch (e) { console.error("雲端存檔啟動失敗:", e); }
+    }
+    initFirebase();
+  </script>
+  <!-- 雲端存檔套件結束 -->
+
+  <script type="text/babel">
+    const { useState, useEffect } = React;
+
+    const ChevronLeft = () => (
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+    );
+    const ChevronRight = () => (
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+    );
+
+    function ReservationCalendar() {
+      const [currentDate, setCurrentDate] = useState(new Date()); 
+      const [dayStatuses, setDayStatuses] = useState({});
+      const [isReadOnly, setIsReadOnly] = useState(true); // 預設為唯讀模式 (客人視角)
+
+      // 動態計算 3 個月範圍
+      const minAllowedDate = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+      const maxAllowedDate = new Date(new Date().getFullYear(), new Date().getMonth() + 2, 1);
+
+      useEffect(() => {
+        // 檢查網址是否有管理員暗號 (例如 ?admin=true)
+        const urlParams = new URLSearchParams(window.location.search);
+        if (urlParams.get('admin') === 'true') {
+          setIsReadOnly(false); // 有暗號就是管理員 (可以編輯)
+        } else {
+          setIsReadOnly(true);  // 沒有暗號就是客人 (唯讀)
+        }
+      }, []);
+
+      // 網頁載入時，自動從雲端抓取同步紀錄
+      useEffect(() => {
+          let unsubscribe = null;
+          const setupSync = () => {
+              if (!window.fbStore || !window.fbStore.auth.currentUser) return;
+              const { db, auth, appId, doc, onSnapshot } = window.fbStore;
+              const userId = auth.currentUser.uid;
+              const docRef = doc(db, 'artifacts', appId, 'users', userId, 'calendar', 'statusData');
+              
+              unsubscribe = onSnapshot(docRef, (snapshot) => {
+                  if (snapshot.exists()) {
+                      setDayStatuses(snapshot.data().statuses || {});
+                  }
+              }, (error) => {
+                  console.error("讀取存檔失敗:", error);
+              });
+          };
+
+          if (window.fbStore) setupSync();
+          else window.addEventListener('firebase-ready', setupSync);
+
+          return () => {
+              if (unsubscribe) unsubscribe();
+              window.removeEventListener('firebase-ready', setupSync);
+          };
+      }, []);
+
+      const canGoPrev = () => {
+        const prevMonth = new Date(currentDate.getFullYear(), currentDate.getMonth() - 1, 1);
+        return prevMonth >= minAllowedDate;
+      };
+
+      const canGoNext = () => {
+        const nextMonth = new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 1);
+        return nextMonth <= maxAllowedDate;
+      };
+
+      const handlePrevMonth = () => {
+        const target = new Date(currentDate.getFullYear(), currentDate.getMonth() - 1, 1);
+        if (isReadOnly && target < minAllowedDate) return;
+        setCurrentDate(target);
+      };
+
+      const handleNextMonth = () => {
+        const target = new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 1);
+        if (isReadOnly && target > maxAllowedDate) return;
+        setCurrentDate(target);
+      };
+
+      const toggleDayStatus = (dateKey) => {
+        if (isReadOnly) return; // 客人唯讀狀態無法點擊修改
+
+        setDayStatuses(prev => {
+          const currentStatus = prev[dateKey];
+          let nextStatus = 'available';
+          
+          if (!currentStatus || currentStatus === 'available') nextStatus = 'full'; 
+          else if (currentStatus === 'full') nextStatus = 'off'; 
+          else nextStatus = 'available'; 
+          
+          const newStatuses = { ...prev, [dateKey]: nextStatus };
+          
+          // 自動將新紀錄即時存進雲端資料庫
+          if (window.fbStore && window.fbStore.auth.currentUser) {
+              const { db, auth, appId, doc, setDoc } = window.fbStore;
+              const userId = auth.currentUser.uid;
+              const docRef = doc(db, 'artifacts', appId, 'users', userId, 'calendar', 'statusData');
+              setDoc(docRef, { statuses: newStatuses }, { merge: true }).catch(e => console.error("存檔失敗:", e));
+          }
+          
+          return newStatuses;
+        });
+      };
+
+      const year = currentDate.getFullYear();
+      const month = currentDate.getMonth();
+      
+      const firstDay = new Date(year, month, 1).getDay();
+      const startingEmptySlots = firstDay === 0 ? 6 : firstDay - 1;
+      const daysInMonth = new Date(year, month + 1, 0).getDate();
+      
+      const monthNames = [
+        "January", "February", "March", "April", "May", "June",
+        "July", "August", "September", "October", "November", "December"
+      ];
+
+      return (
+        <div className="min-h-screen flex flex-col items-center justify-center p-4 font-sans" style={{ 
+          fontFamily: "'Quicksand', sans-serif",
+          backgroundColor: "#e0d6cd", 
+          backgroundImage: "radial-gradient(#bfaea2 1.5px, transparent 1.5px)", 
+          backgroundSize: "16px 16px", 
+          backgroundPosition: "calc(50% + 6px) center" 
+        }}>
+          
+          {/* 上方泡泡導覽列 */}
+          <div className="w-full max-w-[400px] h-[44px] mb-[39px] bg-[#F8F6F2] rounded-full flex justify-between items-center px-4 relative z-20 shadow-sm">
+            <div className="absolute -bottom-[5px] left-1/2 -translate-x-1/2 w-3.5 h-3.5 bg-[#F8F6F2] rotate-45 rounded-[2px]"></div>
+            
+            <button 
+              onClick={handlePrevMonth} 
+              disabled={!canGoPrev()}
+              className={`p-1 rounded-full transition-all shrink-0 ${
+                !canGoPrev() ? 'opacity-30 cursor-not-allowed text-[#CDBEAD]' : 'hover:bg-[#e0d6cd] text-[#CDBEAD] active:scale-90'
+              }`}
+            >
+              <ChevronLeft />
+            </button>
+
+            <div className="flex-1 text-center text-[11px] font-bold tracking-widest text-[#A89B90]">
+              {isReadOnly ? "✦ 預約狀況檢視 (3個月內) ✦" : "✦ 管理員編輯模式 ✦"}
+            </div>
+
+            <button 
+              onClick={handleNextMonth} 
+              disabled={!canGoNext()}
+              className={`p-1 rounded-full transition-all shrink-0 ${
+                !canGoNext() ? 'opacity-30 cursor-not-allowed text-[#CDBEAD]' : 'hover:bg-[#e0d6cd] text-[#CDBEAD] active:scale-90'
+              }`}
+            >
+              <ChevronRight />
+            </button>
+          </div>
+
+          {/* 日曆卡片主體 - 70% 透明度 */}
+          <div className="w-full max-w-[400px] relative bg-[#F8F6F2]/70 shadow-md rounded-[2rem] overflow-hidden px-6 pt-5 pb-5 flex flex-col">
+            
+            {/* 頂部專屬品牌小字 */}
+            <div className="absolute top-[6px] left-1/2 -translate-x-1/2 text-[8px] font-medium tracking-[0.15em] text-[#A89B90] pointer-events-none">
+              ▪︎AMBO.ART▪︎
+            </div>
+
+            {/* 左上角小星星裝飾 */}
+            <svg className="absolute top-5 left-5 w-5 h-5 text-[#CDBEAD]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+              <path d="M12 2L14.5 9.5L22 12L14.5 14.5L12 22L9.5 14.5L2 12L9.5 9.5L12 2Z" strokeLinejoin="round"/>
+            </svg>
+
+            {/* 右上角可愛日系手繪大小雙花 */}
+            <svg className="absolute top-[18px] right-[18px] w-[28px] h-[28px] text-[#CDBEAD]" viewBox="0 0 28 28" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+              <g transform="translate(0, 6) scale(0.85)">
+                <path d="M12 6.5C13.5 3 18 4.5 17.5 8C21.5 8.5 21.5 14 18 15C19 19 14.5 21.5 12 18.5C9.5 21.5 5 19 6 15C2.5 14 2.5 8.5 6.5 8C6 4.5 10.5 3 12 6.5Z"/>
+                <circle cx="12" cy="12.5" r="1.5"/>
+              </g>
+              <g transform="translate(15, 0) scale(0.55)">
+                <path fill="currentColor" stroke="none" d="M12 6.5C13.5 3 18 4.5 17.5 8C21.5 8.5 21.5 14 18 15C19 19 14.5 21.5 12 18.5C9.5 21.5 5 19 6 15C2.5 14 2.5 8.5 6.5 8C6 4.5 10.5 3 12 6.5Z"/>
+                <circle cx="12" cy="12.5" r="1.5" fill="#F8F6F2" stroke="none" />
+              </g>
+            </svg>
+
+            {/* 標題區 */}
+            <div className="text-center mb-2 mt-0">
+              <div className="flex items-baseline justify-center gap-3">
+                <h1 className="text-[2.6rem] text-[#5D4B41] leading-none font-bold" style={{ fontFamily: "'Dancing Script', cursive" }}>
+                  {monthNames[month]}
+                </h1>
+                <span className="text-[14px] tracking-[0.15em] text-[#A89B90] font-bold mb-1">
+                  {(month + 1).toString().padStart(2, '0')} / {year}
+                </span>
+              </div>
+              <div className="flex justify-center -mt-1.5">
+                 <svg width="85" height="12" viewBox="0 0 120 15" fill="none" xmlns="http://www.w3.org/2000/svg">
+                   <path d="M6 9 C 40 18, 85 16, 114 4" stroke="#e0d6cd" strokeWidth="2.5" strokeLinecap="round"/>
+                 </svg>
+              </div>
+            </div>
+
+            {/* 星期標頭 */}
+            <div className="grid grid-cols-7 gap-1 text-center text-[13px] font-bold tracking-widest text-[#A89B90] mb-2">
+              <div>MON</div><div>TUE</div><div>WED</div><div>THU</div><div>FRI</div>
+              <div className="text-[#D58C92]">SAT</div><div className="text-[#D58C92]">SUN</div>
+            </div>
+            
+            <div className="border-b-[1.5px] border-[#e0d6cd]/70 mb-2"></div>
+
+            {/* 日期網格 */}
+            <div className="grid grid-cols-7 gap-y-1.5 gap-x-1 flex-grow content-start">
+              {Array.from({ length: startingEmptySlots }).map((_, index) => (
+                <div key={`empty-${index}`} className="h-[34px]"></div>
+              ))}
+              
+              {Array.from({ length: daysInMonth }).map((_, index) => {
+                const day = index + 1;
+                const dateKey = `${year}-${month + 1}-${day}`;
+                const status = dayStatuses[dateKey] || 'available';
+                
+                return (
+                  <div 
+                    key={dateKey} 
+                    onClick={() => toggleDayStatus(dateKey)}
+                    className={`flex flex-col items-center justify-center group h-[34px] relative ${isReadOnly ? 'cursor-default' : 'cursor-pointer'}`}
+                  >
+                    <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                      {status === 'available' && (
+                        <div className="w-[28px] h-[28px] border-[1.5px] border-dashed border-[#CDBEAD] rounded-full transition-all duration-300"></div>
+                      )}
+                      {status === 'off' && (
+                        <div className="w-[28px] h-[28px] bg-[#E29A9F] transition-all duration-300 scale-105" 
+                             style={{ borderRadius: "55% 45% 35% 65% / 45% 55% 45% 55%", transform: "rotate(-2deg)" }}></div>
+                      )}
+                      {status === 'full' && (
+                        <div className="w-[28px] h-[28px] bg-[#9BB1CC] transition-all duration-300 scale-105"
+                             style={{ borderRadius: "43% 57% 65% 35% / 55% 45% 55% 45%", transform: "rotate(3deg)" }}></div>
+                      )}
+                    </div>
+                    <span className={`text-[13px] font-bold z-10 transition-colors ${
+                      status === 'off' || status === 'full' ? 'text-white' : 'text-[#5D4B41]'
+                    }`}>
+                      {day}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* 底部圖例說明區 */}
+            <div className="mt-4 pt-3 relative">
+              <div className="absolute top-0 left-2 right-2 border-t-[1.5px] border-dashed border-[#e0d6cd]/80"></div>
+              <div className="flex justify-center gap-5 items-center pt-1">
+                <div className="flex items-center gap-1.5">
+                  <div className="w-[16px] h-[16px] border-[1.5px] border-dashed border-[#CDBEAD] rounded-full"></div>
+                  <span className="text-[14px] font-bold text-[#5D4B41] tracking-widest">尚有空位</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <div className="w-[16px] h-[16px] bg-[#9BB1CC]" style={{ borderRadius: "43% 57% 65% 35% / 55% 45% 55% 45%" }}></div>
+                  <span className="text-[14px] font-bold text-[#5D4B41] tracking-widest">已額滿</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <div className="w-[16px] h-[16px] bg-[#E29A9F]" style={{ borderRadius: "55% 45% 35% 65% / 45% 55% 45% 55%" }}></div>
+                  <span className="text-[14px] font-bold text-[#5D4B41] tracking-widest">休假</span>
+                </div>
+              </div>
+              <svg className="absolute right-1 bottom-1 w-[18px] h-[18px] text-[#CDBEAD]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 3v18M3 12h18M5.6 5.6l12.8 12.8M5.6 18.4L18.4 5.6"/>
+              </svg>
+            </div>
+            
+          </div>
+
+          {/* 管理員專屬提示文字 */}
+          {!isReadOnly && (
+            <div className="mt-4 px-4 py-2 bg-[#F8F6F2]/90 rounded-full text-[#5D4B41] text-[12px] font-bold tracking-widest shadow-sm">
+              ✨ 您目前身處管理員編輯模式（所有點擊會即時自動同步到雲端）
+            </div>
+          )}
+
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<ReservationCalendar />);
+  </script>
+</body>
+</html>
